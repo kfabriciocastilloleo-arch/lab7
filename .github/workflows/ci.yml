@@ -1,0 +1,160 @@
+name: CI Monorepo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      backend: ${{ steps.filter.outputs.backend }}
+      infra: ${{ steps.filter.outputs.infra }}
+      docs: ${{ steps.filter.outputs.docs }}
+      only-docs: ${{ steps.only-docs.outputs.only-docs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+            backend:
+              - 'backend/**'
+            infra:
+              - 'infra/**'
+            docs:
+              - 'docs/**'
+
+      - name: Check if only docs changed
+        id: only-docs
+        run: |
+          if [[ "${{ steps.filter.outputs.docs }}" == "true" && \
+                "${{ steps.filter.outputs.frontend }}" == "false" && \
+                "${{ steps.filter.outputs.backend }}" == "false" && \
+                "${{ steps.filter.outputs.infra }}" == "false" ]]; then
+            echo "only-docs=true" >> $GITHUB_OUTPUT
+          else
+            echo "only-docs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Show detection result
+        run: |
+          echo "frontend=${{ steps.filter.outputs.frontend }}"
+          echo "backend=${{ steps.filter.outputs.backend }}"
+          echo "infra=${{ steps.filter.outputs.infra }}"
+          echo "docs=${{ steps.filter.outputs.docs }}"
+          echo "only-docs=${{ steps.only-docs.outputs.only-docs }}"
+
+  frontend-ci:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    uses: ./.github/workflows/reusable-frontend.yml
+    secrets: inherit
+
+  backend-ci:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    uses: ./.github/workflows/reusable-backend.yml
+    secrets: inherit
+
+  infra-ci:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.infra == 'true'
+    uses: ./.github/workflows/reusable-infra.yml
+    secrets: inherit
+
+  docs-ci:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.only-docs == 'true'
+    uses: ./.github/workflows/reusable-docs.yml
+    secrets: inherit
+
+  report:
+    needs:
+      - detect-changes
+      - frontend-ci
+      - backend-ci
+      - infra-ci
+      - docs-ci
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate report
+        run: |
+          affected=""
+          executed=""
+          skipped=""
+
+          # Detectar componentes afectados
+          [[ "${{ needs.detect-changes.outputs.frontend }}" == "true" ]] && affected+="| Frontend"
+          [[ "${{ needs.detect-changes.outputs.backend }}" == "true" ]] && affected+="| Backend"
+          [[ "${{ needs.detect-changes.outputs.infra }}" == "true" ]] && affected+="| Infra"
+          [[ "${{ needs.detect-changes.outputs.docs }}" == "true" ]] && affected+="| Docs"
+
+          # Pipeline frontend
+          if [[ "${{ needs.detect-changes.outputs.frontend }}" == "true" ]]; then
+            executed+="| Frontend CI → ${{ needs.frontend-ci.result }}"
+          else
+            skipped+="| Frontend CI (no afectado)"
+          fi
+
+          # Pipeline backend
+          if [[ "${{ needs.detect-changes.outputs.backend }}" == "true" ]]; then
+            executed+="| Backend CI → ${{ needs.backend-ci.result }}"
+          else
+            skipped+="| Backend CI (no afectado)"
+          fi
+
+          # Pipeline infra
+          if [[ "${{ needs.detect-changes.outputs.infra }}" == "true" ]]; then
+            executed+="| Infra CI → ${{ needs.infra-ci.result }}"
+          else
+            skipped+="| Infra CI (no afectado)"
+          fi
+
+          # Pipeline docs
+          if [[ "${{ needs.detect-changes.outputs.only-docs }}" == "true" ]]; then
+            executed+="| Docs CI → ${{ needs.docs-ci.result }}"
+          elif [[ "${{ needs.detect-changes.outputs.docs }}" == "true" ]]; then
+            skipped+="| Docs CI (omitido — cambios docs + código real)"
+          else
+            skipped+="| Docs CI (no afectado)"
+          fi
+
+          {
+            echo "## Resumen de ejecucion"
+            echo ""
+            echo "### Commit: ${{ github.sha }}"
+            echo "### Rama: ${{ github.ref_name }}"
+            echo "### Trigger: ${{ github.event_name }}"
+            echo ""
+            echo "| Tipo | Detalle |"
+            echo "|------|---------|"
+            echo "$affected" | tr '|' '\n' | grep -v '^$' | while read -r line; do
+              echo "| Componente afectado | ${line} |"
+            done
+            echo ""
+            echo "### Pipelines ejecutados"
+            echo ""
+            echo "$executed" | tr '|' '\n' | grep -v '^$' | while read -r line; do
+              echo "- ${line}"
+            done
+            echo ""
+            echo "### Jobs omitidos"
+            echo ""
+            echo "$skipped" | tr '|' '\n' | grep -v '^$' | while read -r line; do
+              echo "- ${line}"
+            done
+          } >> $GITHUB_STEP_SUMMARY

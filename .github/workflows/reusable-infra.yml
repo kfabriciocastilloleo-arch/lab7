@@ -1,0 +1,29 @@
+name: Reusable Infra CI
+
+on:
+  workflow_call:
+
+jobs:
+  docker-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: infra/docker-compose.yml
+          failure-threshold: warning
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+      - run: terraform fmt -check
+        working-directory: infra/terraform
+        continue-on-error: true
+      - run: terraform init
+        working-directory: infra/terraform
+      - run: terraform validate
+        working-directory: infra/terraform
